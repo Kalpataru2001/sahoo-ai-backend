@@ -23,33 +23,34 @@ const model = genAI.getGenerativeModel({
 
 app.post('/api/chat', async (req, res) => {
     try {
-        console.log("--- New Request Received ---");
-        console.log("Body from Angular:", req.body);
-        
         const userMessage = req.body.message;
+        const chatHistory = req.body.history || []; 
+
+        console.log("--- New Request Received ---");
+        console.log("User says:", userMessage);
+        console.log(`Memory attached: ${chatHistory.length} previous messages`);
         
         if (!userMessage) {
             throw new Error("Message from frontend is undefined or empty!");
         }
 
-        console.log("Sending to Gemini:", userMessage);
+        const chat = model.startChat({
+            history: chatHistory
+        });
         
-        // Call the Gemini API
-        const result = await model.generateContent(userMessage);
+        const result = await chat.sendMessage(userMessage);
         const botResponse = await result.response.text();
         
         console.log("Gemini replied successfully!");
         res.json({ reply: botResponse });
+
     } catch (error) {
         console.error("❌ Error calling Gemini API:");
         console.error(error); 
-        
-        // Handle the Rate Limit (Too Many Requests) specifically
-        if (error.status === 429) {
+        if (error.status === 429 || (error.message && error.message.includes('429'))) {
             return res.status(429).json({ error: "Whoa, we are talking too fast! Give my digital brain about 60 seconds to catch its breath." });
         }
         
-        // Handle all other errors
         res.status(500).json({ error: "Brain disconnected. Try again later." });
     }
 });
