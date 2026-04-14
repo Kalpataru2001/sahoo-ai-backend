@@ -24,7 +24,11 @@ const model = genAI.getGenerativeModel({
 app.post('/api/chat', async (req, res) => {
     try {
         const userMessage = req.body.message;
-        const chatHistory = req.body.history || []; 
+        let chatHistory = req.body.history || []; 
+
+        while (chatHistory.length > 0 && chatHistory[0].role === 'model') {
+            chatHistory.shift(); 
+        }
 
         console.log("--- New Request Received ---");
         console.log("User says:", userMessage);
