@@ -30,6 +30,7 @@ const API_KEYS = getApiKeys();
 console.log(`Loaded ${API_KEYS.length} Gemini API Key(s)`);
 
 const GEMINI_MODELS = [
+  "gemini-flash-latest",
   "gemini-2.0-flash",
   "gemini-2.0-flash-lite"
 ];
