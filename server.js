@@ -10,9 +10,9 @@ app.use(express.json({ limit: '4mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 console.log("API key loaded:", !!process.env.GEMINI_API_KEY);
 
-// Model fallback list (ordered by stability and free quota availability)
-const PRIMARY_MODEL = "gemini-1.5-flash";
-const FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite-preview-02-05"];
+// Restored exact previous model tag: gemini-flash-latest (with 2.0 / 1.5 fallbacks)
+const PRIMARY_MODEL = "gemini-flash-latest";
+const FALLBACK_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash"];
 
 // Helper function to execute Gemini calls with automatic model fallback & rate limit retry logic
 async function callGeminiWithFallback(fn) {
@@ -25,15 +25,12 @@ async function callGeminiWithFallback(fn) {
     } catch (err) {
       lastError = err;
       console.warn(`⚠️ Model ${modelName} failed/rate limited. Error: ${err.message || err}`);
-      // If error is 429 or quota exceeded, try next fallback model immediately
       if (err.status === 429 || (err.message && (err.message.includes('429') || err.message.includes('Quota exceeded')))) {
         continue;
       }
-      // If it's a model not found / unavailable error, try next
       if (err.status === 404 || (err.message && err.message.includes('not found'))) {
         continue;
       }
-      // For non-quota errors, throw immediately
       throw err;
     }
   }
@@ -180,7 +177,7 @@ Output (JSON array only):`;
 });
 
 // ── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.1-fallback' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.2-gemini-flash-latest' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 AI Companion backend v2.1 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 AI Companion backend v2.2 running on port ${PORT}`));
