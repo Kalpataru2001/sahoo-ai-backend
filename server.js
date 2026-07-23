@@ -10,9 +10,14 @@ app.use(express.json({ limit: '4mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 console.log("API key loaded:", !!process.env.GEMINI_API_KEY);
 
-// Restored exact previous model tag: gemini-flash-latest (with 2.0 / 1.5 fallbacks)
-const PRIMARY_MODEL = "gemini-flash-latest";
-const FALLBACK_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash"];
+// Robust model fallback list (uses valid Gemini API model tags)
+const PRIMARY_MODEL = "gemini-1.5-flash-latest";
+const FALLBACK_MODELS = [
+  "gemini-1.5-flash-8b",
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-1.5-pro-latest"
+];
 
 // Helper function to execute Gemini calls with automatic model fallback & rate limit retry logic
 async function callGeminiWithFallback(fn) {
