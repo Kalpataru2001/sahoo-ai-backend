@@ -7,42 +7,63 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '4mb' }));
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-console.log("API key loaded:", !!process.env.GEMINI_API_KEY);
+// Parse API Keys from environment (supports single key, comma-separated keys, or GEMINI_API_KEY_1, _2, etc.)
+function getApiKeys() {
+  const keys = [];
+  if (process.env.GEMINI_API_KEYS) {
+    keys.push(...process.env.GEMINI_API_KEYS.split(',').map(k => k.trim()).filter(Boolean));
+  }
+  if (process.env.GEMINI_API_KEY) {
+    keys.push(...process.env.GEMINI_API_KEY.split(',').map(k => k.trim()).filter(Boolean));
+  }
+  // Check GEMINI_API_KEY_1, GEMINI_API_KEY_2...
+  let idx = 1;
+  while (process.env[`GEMINI_API_KEY_${idx}`]) {
+    keys.push(process.env[`GEMINI_API_KEY_${idx}`].trim());
+    idx++;
+  }
+  // Deduplicate
+  return [...new Set(keys)];
+}
 
-// Valid supported Gemini models on current v1beta API
+const API_KEYS = getApiKeys();
+console.log(`Loaded ${API_KEYS.length} Gemini API Key(s)`);
+
 const GEMINI_MODELS = [
   "gemini-2.0-flash",
-  "gemini-2.0-flash-lite",
-  "gemini-2.0-flash-exp"
+  "gemini-2.0-flash-lite"
 ];
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Helper to attempt Gemini calls across available models
-async function callGeminiWithFallback(fn) {
+// Executes Gemini call across available API keys and models with automatic rotation & fallback
+async function callGeminiWithRotation(fn) {
   let lastError = null;
 
-  for (let i = 0; i < GEMINI_MODELS.length; i++) {
-    const modelName = GEMINI_MODELS[i];
-    try {
-      return await fn(modelName);
-    } catch (err) {
-      lastError = err;
-      const is429 = err.status === 429 || (err.message && (err.message.includes('429') || err.message.includes('Quota exceeded')));
-      const is404 = err.status === 404 || (err.message && err.message.includes('not found'));
+  for (let k = 0; k < API_KEYS.length; k++) {
+    const key = API_KEYS[k];
+    const genAI = new GoogleGenerativeAI(key);
 
-      console.warn(`⚠️ Model '${modelName}' notice: ${err.message || err}`);
+    for (let m = 0; m < GEMINI_MODELS.length; m++) {
+      const modelName = GEMINI_MODELS[m];
+      try {
+        return await fn(genAI, modelName);
+      } catch (err) {
+        lastError = err;
+        const is429 = err.status === 429 || (err.message && (err.message.includes('429') || err.message.includes('Quota exceeded')));
+        const is404 = err.status === 404 || (err.message && err.message.includes('not found'));
 
-      if (is429) {
-        // Wait 1 second before trying fallback model if rate limited
-        await sleep(1000);
-        continue;
+        console.warn(`⚠️ Key #${k + 1} with model '${modelName}' notice: ${err.message || err}`);
+
+        if (is429) {
+          await sleep(500);
+          continue; // Try next model or next key
+        }
+        if (is404) {
+          continue;
+        }
+        throw err;
       }
-      if (is404) {
-        continue;
-      }
-      throw err;
     }
   }
 
@@ -110,7 +131,7 @@ app.post('/api/chat', async (req, res) => {
     console.log(`User (${userName}):`, message);
     console.log(`History: ${chatHistory.length} msgs | Memories: ${memories.length}`);
 
-    const reply = await callGeminiWithFallback(async (modelName) => {
+    const reply = await callGeminiWithRotation(async (genAI, modelName) => {
       const model = genAI.getGenerativeModel({
         model: modelName,
         systemInstruction,
@@ -124,18 +145,15 @@ app.post('/api/chat', async (req, res) => {
     res.json({ reply });
 
   } catch (err) {
-    console.error('❌ Chat error:', err.message || err);
-    if (err.status === 429 || (err.message && (err.message.includes('429') || err.message.includes('Quota exceeded')))) {
-      return res.json({ 
-        reply: "⏳ Google AI Free Tier speed limit reached (15 msgs/min limit). Please wait ~20 seconds and ask your question again!" 
-      });
-    }
-    res.json({ reply: "My backend is taking a short breath. Please try again in 10 seconds!" });
+    console.error('❌ Chat execution caught:', err.message || err);
+    // Graceful response if API quota / 429 limit reached on all keys
+    res.json({ 
+      reply: "⏳ Gemini Free Tier daily/minute quota limit reached on your API key! Please wait a short moment or create a new free API key at https://aistudio.google.com and add it to your environment variables." 
+    });
   }
 });
 
 // ── Memory Extraction Endpoint ───────────────────────────────────────────────
-// Analyses a short conversation snippet and returns new facts about the user.
 app.post('/api/extract-memories', async (req, res) => {
   try {
     const { conversation, existingMemories = [] } = req.body;
@@ -163,7 +181,7 @@ ${conversation}
 
 Output (JSON array only):`;
 
-    const rawReply = await callGeminiWithFallback(async (modelName) => {
+    const rawReply = await callGeminiWithRotation(async (genAI, modelName) => {
       const extractModel = genAI.getGenerativeModel({ model: modelName });
       const result = await extractModel.generateContent(prompt);
       return result.response.text();
@@ -185,13 +203,13 @@ Output (JSON array only):`;
     res.json({ memories: facts });
 
   } catch (err) {
-    console.log('ℹ️ Memory extraction skipped due to rate limit');
+    console.log('ℹ️ Memory extraction skipped due to API key rate limit or error');
     res.json({ memories: [] });
   }
 });
 
 // ── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.4-clean-fallback' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.5-key-rotation' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 AI Companion backend v2.4 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 AI Companion backend v2.5 running on port ${PORT}`));
