@@ -10,6 +10,36 @@ app.use(express.json({ limit: '4mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 console.log("API key loaded:", !!process.env.GEMINI_API_KEY);
 
+// Model fallback list (ordered by stability and free quota availability)
+const PRIMARY_MODEL = "gemini-1.5-flash";
+const FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite-preview-02-05"];
+
+// Helper function to execute Gemini calls with automatic model fallback & rate limit retry logic
+async function callGeminiWithFallback(fn) {
+  const modelsToTry = [PRIMARY_MODEL, ...FALLBACK_MODELS];
+  let lastError = null;
+
+  for (const modelName of modelsToTry) {
+    try {
+      return await fn(modelName);
+    } catch (err) {
+      lastError = err;
+      console.warn(`⚠️ Model ${modelName} failed/rate limited. Error: ${err.message || err}`);
+      // If error is 429 or quota exceeded, try next fallback model immediately
+      if (err.status === 429 || (err.message && (err.message.includes('429') || err.message.includes('Quota exceeded')))) {
+        continue;
+      }
+      // If it's a model not found / unavailable error, try next
+      if (err.status === 404 || (err.message && err.message.includes('not found'))) {
+        continue;
+      }
+      // For non-quota errors, throw immediately
+      throw err;
+    }
+  }
+  throw lastError;
+}
+
 // ── Build a rich dynamic system prompt from user profile + memories ──────────
 function buildSystemPrompt(userName, occupation, tone, memories) {
   const name    = userName   || 'friend';
@@ -71,21 +101,22 @@ app.post('/api/chat', async (req, res) => {
     console.log(`User (${userName}):`, message);
     console.log(`History: ${chatHistory.length} msgs | Memories: ${memories.length}`);
 
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-2.0-flash',
-      systemInstruction,
+    const reply = await callGeminiWithFallback(async (modelName) => {
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction,
+      });
+      const chat = model.startChat({ history: chatHistory });
+      const result = await chat.sendMessage(message);
+      return result.response.text();
     });
-
-    const chat  = model.startChat({ history: chatHistory });
-    const result = await chat.sendMessage(message);
-    const reply  = result.response.text();
 
     console.log('Gemini replied ✓');
     res.json({ reply });
 
   } catch (err) {
     console.error('❌ Chat error:', err);
-    if (err.status === 429 || (err.message && err.message.includes('429'))) {
+    if (err.status === 429 || (err.message && (err.message.includes('429') || err.message.includes('Quota exceeded')))) {
       return res.status(429).json({ error: "We're talking too fast! Give me ~60 seconds to breathe." });
     }
     res.status(500).json({ error: 'Brain disconnected. Try again later.' });
@@ -98,7 +129,7 @@ app.post('/api/extract-memories', async (req, res) => {
   try {
     const { conversation, existingMemories = [] } = req.body;
 
-    if (!conversation || conversation.trim().length < 10) {
+    if (!conversation || conversation.trim().length < 15) {
       return res.json({ memories: [] });
     }
 
@@ -121,12 +152,13 @@ ${conversation}
 
 Output (JSON array only):`;
 
-    const extractModel = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-    const result = await extractModel.generateContent(prompt);
-    let raw = result.response.text().trim();
+    const rawReply = await callGeminiWithFallback(async (modelName) => {
+      const extractModel = genAI.getGenerativeModel({ model: modelName });
+      const result = await extractModel.generateContent(prompt);
+      return result.response.text();
+    });
 
-    // Strip any markdown code fences if model wraps output
-    raw = raw.replace(/^```json?\s*/i, '').replace(/```$/, '').trim();
+    let raw = rawReply.trim().replace(/^```json?\s*/i, '').replace(/```$/, '').trim();
 
     let facts = [];
     try {
@@ -136,20 +168,19 @@ Output (JSON array only):`;
       facts = [];
     }
 
-    // Limit to 5 new facts per extraction to avoid noise
     facts = facts.slice(0, 5);
 
     console.log(`Extracted ${facts.length} new memory facts`);
     res.json({ memories: facts });
 
   } catch (err) {
-    console.error('❌ Memory extraction error:', err);
+    console.error('❌ Memory extraction error (handled):', err.message || err);
     res.json({ memories: [] }); // Fail silently — memory extraction is non-critical
   }
 });
 
 // ── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.0-memory' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.1-fallback' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 AI Companion backend v2.0 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 AI Companion backend v2.1 running on port ${PORT}`));
