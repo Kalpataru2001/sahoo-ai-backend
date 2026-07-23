@@ -10,19 +10,21 @@ app.use(express.json({ limit: '4mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 console.log("API key loaded:", !!process.env.GEMINI_API_KEY);
 
-// Official supported Gemini models for generateContent in v1beta SDK
+// Valid supported Gemini models on current v1beta API
 const GEMINI_MODELS = [
   "gemini-2.0-flash",
   "gemini-2.0-flash-lite",
-  "gemini-1.5-flash",
-  "gemini-1.5-pro"
+  "gemini-2.0-flash-exp"
 ];
 
-// Helper to attempt Gemini calls across available models with rate-limit recovery
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper to attempt Gemini calls across available models
 async function callGeminiWithFallback(fn) {
   let lastError = null;
 
-  for (const modelName of GEMINI_MODELS) {
+  for (let i = 0; i < GEMINI_MODELS.length; i++) {
+    const modelName = GEMINI_MODELS[i];
     try {
       return await fn(modelName);
     } catch (err) {
@@ -32,16 +34,18 @@ async function callGeminiWithFallback(fn) {
 
       console.warn(`⚠️ Model '${modelName}' notice: ${err.message || err}`);
 
-      if (is429 || is404) {
-        // Try next model in fallback list
+      if (is429) {
+        // Wait 1 second before trying fallback model if rate limited
+        await sleep(1000);
         continue;
       }
-      // For other unexpected errors, throw immediately
+      if (is404) {
+        continue;
+      }
       throw err;
     }
   }
 
-  // If all models failed or hit quota limit
   throw lastError;
 }
 
@@ -122,11 +126,11 @@ app.post('/api/chat', async (req, res) => {
   } catch (err) {
     console.error('❌ Chat error:', err.message || err);
     if (err.status === 429 || (err.message && (err.message.includes('429') || err.message.includes('Quota exceeded')))) {
-      return res.status(429).json({ 
-        error: "Google AI Free Tier speed limit reached! Please wait 15–20 seconds and try again. ⏳" 
+      return res.json({ 
+        reply: "⏳ Google AI Free Tier speed limit reached (15 msgs/min limit). Please wait ~20 seconds and ask your question again!" 
       });
     }
-    res.status(500).json({ error: 'Brain disconnected. Try again later.' });
+    res.json({ reply: "My backend is taking a short breath. Please try again in 10 seconds!" });
   }
 });
 
@@ -181,14 +185,13 @@ Output (JSON array only):`;
     res.json({ memories: facts });
 
   } catch (err) {
-    // Fail silently on rate limit or error — memory extraction must never disrupt chat
-    console.log('ℹ️ Memory extraction skipped due to API rate limit or error');
+    console.log('ℹ️ Memory extraction skipped due to rate limit');
     res.json({ memories: [] });
   }
 });
 
 // ── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.3-official-models' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.4-clean-fallback' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 AI Companion backend v2.3 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 AI Companion backend v2.4 running on port ${PORT}`));
