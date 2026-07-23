@@ -10,35 +10,38 @@ app.use(express.json({ limit: '4mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 console.log("API key loaded:", !!process.env.GEMINI_API_KEY);
 
-// Robust model fallback list (uses valid Gemini API model tags)
-const PRIMARY_MODEL = "gemini-1.5-flash-latest";
-const FALLBACK_MODELS = [
-  "gemini-1.5-flash-8b",
+// Official supported Gemini models for generateContent in v1beta SDK
+const GEMINI_MODELS = [
   "gemini-2.0-flash",
   "gemini-2.0-flash-lite",
-  "gemini-1.5-pro-latest"
+  "gemini-1.5-flash",
+  "gemini-1.5-pro"
 ];
 
-// Helper function to execute Gemini calls with automatic model fallback & rate limit retry logic
+// Helper to attempt Gemini calls across available models with rate-limit recovery
 async function callGeminiWithFallback(fn) {
-  const modelsToTry = [PRIMARY_MODEL, ...FALLBACK_MODELS];
   let lastError = null;
 
-  for (const modelName of modelsToTry) {
+  for (const modelName of GEMINI_MODELS) {
     try {
       return await fn(modelName);
     } catch (err) {
       lastError = err;
-      console.warn(`⚠️ Model ${modelName} failed/rate limited. Error: ${err.message || err}`);
-      if (err.status === 429 || (err.message && (err.message.includes('429') || err.message.includes('Quota exceeded')))) {
+      const is429 = err.status === 429 || (err.message && (err.message.includes('429') || err.message.includes('Quota exceeded')));
+      const is404 = err.status === 404 || (err.message && err.message.includes('not found'));
+
+      console.warn(`⚠️ Model '${modelName}' notice: ${err.message || err}`);
+
+      if (is429 || is404) {
+        // Try next model in fallback list
         continue;
       }
-      if (err.status === 404 || (err.message && err.message.includes('not found'))) {
-        continue;
-      }
+      // For other unexpected errors, throw immediately
       throw err;
     }
   }
+
+  // If all models failed or hit quota limit
   throw lastError;
 }
 
@@ -117,9 +120,11 @@ app.post('/api/chat', async (req, res) => {
     res.json({ reply });
 
   } catch (err) {
-    console.error('❌ Chat error:', err);
+    console.error('❌ Chat error:', err.message || err);
     if (err.status === 429 || (err.message && (err.message.includes('429') || err.message.includes('Quota exceeded')))) {
-      return res.status(429).json({ error: "We're talking too fast! Give me ~60 seconds to breathe." });
+      return res.status(429).json({ 
+        error: "Google AI Free Tier speed limit reached! Please wait 15–20 seconds and try again. ⏳" 
+      });
     }
     res.status(500).json({ error: 'Brain disconnected. Try again later.' });
   }
@@ -176,13 +181,14 @@ Output (JSON array only):`;
     res.json({ memories: facts });
 
   } catch (err) {
-    console.error('❌ Memory extraction error (handled):', err.message || err);
-    res.json({ memories: [] }); // Fail silently — memory extraction is non-critical
+    // Fail silently on rate limit or error — memory extraction must never disrupt chat
+    console.log('ℹ️ Memory extraction skipped due to API rate limit or error');
+    res.json({ memories: [] });
   }
 });
 
 // ── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.2-gemini-flash-latest' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.3-official-models' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 AI Companion backend v2.2 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 AI Companion backend v2.3 running on port ${PORT}`));
